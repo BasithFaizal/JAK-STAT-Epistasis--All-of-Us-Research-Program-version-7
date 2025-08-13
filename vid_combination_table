@@ -1,0 +1,25 @@
+from google.cloud import storage
+import pandas as pd
+import io
+import os
+
+# Step 1: Load disease_variant_person.parquet from GCS
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+blob = bucket.blob("data/internship-directory/disease_variant_person.parquet")
+
+parquet_bytes = blob.download_as_bytes()
+df = pd.read_parquet(io.BytesIO(parquet_bytes))
+
+# Step 2: Count number of unique person_ids per variant_combination_id
+combo_counts = (
+    df[["variant_combination_id", "person_id"]]
+    .drop_duplicates()
+    .groupby("variant_combination_id")
+    .size()
+    .reset_index(name="num_people")
+)
+
+# Step 3: Filter for combinations shared by more than one person
+multi_person_combos = combo_counts[combo_counts["num_people"] > 1]
