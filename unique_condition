@@ -1,0 +1,17 @@
+from google.cloud import storage
+import pandas as pd
+import io
+import os
+
+# Step 1: Load condition.parquet from GCS
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+blob = bucket.blob("data/internship-directory/condition.parquet")
+
+# Download and read parquet into DataFrame
+parquet_bytes = blob.download_as_bytes()
+condition_df = pd.read_parquet(io.BytesIO(parquet_bytes))
+
+# Step 2: Extract unique diseases (standard_name)
+unique_diseases_df = condition_df[["standard_name"]].dropna().drop_duplicates().reset_index(drop=True)
