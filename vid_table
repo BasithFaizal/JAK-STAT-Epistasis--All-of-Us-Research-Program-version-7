@@ -1,0 +1,20 @@
+# Vid Table
+import pandas as pd
+import os
+
+# Get your CDR dataset name
+cdr = os.environ["WORKSPACE_CDR"]
+
+# SQL to find all tables that have a column named 'vid'
+vid_column_query = f"""
+    SELECT 
+        table_name, 
+        column_name, 
+        data_type 
+    FROM `{cdr}.INFORMATION_SCHEMA.COLUMNS`
+    WHERE LOWER(column_name) = 'vid'
+"""
+
+# Run the query
+vid_tables_df = pd.read_gbq(vid_column_query, dialect="standard")
+vid_tables_df
