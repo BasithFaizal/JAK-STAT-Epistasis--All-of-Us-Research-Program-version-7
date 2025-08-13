@@ -1,0 +1,62 @@
+from google.cloud import storage
+import pandas as pd
+import io
+import os
+from itertools import combinations
+
+# Initialize GCS client and bucket
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+
+# Load epistasis.parquet (variants + person_id + vid)
+variant_blob = bucket.blob("data/internship-directory/epistasis.parquet")
+variant_bytes = variant_blob.download_as_bytes()
+variant_df = pd.read_parquet(io.BytesIO(variant_bytes))
+
+# Load condition.parquet (conditions per person)
+condition_blob = bucket.blob("data/internship-directory/condition.parquet")
+condition_bytes = condition_blob.download_as_bytes()
+condition_df = pd.read_parquet(io.BytesIO(condition_bytes))
+
+# === Generate variant combinations per person ===
+person_vids = variant_df.groupby("person_id")["vid"].unique()
+
+combination_set = set()
+for vids in person_vids:
+    vids = sorted(set(vids))
+    for r in range(2, len(vids) + 1):
+        for combo in combinations(vids, r):
+            combination_set.add(combo)
+
+combination_list = list(combination_set)
+
+# Map each combo to a unique variant_combination_id
+combo_id_map = {combo: idx for idx, combo in enumerate(combination_list, start=1)}
+
+# Prepare a list for variant_combination_id per person
+records = []
+
+for person_id, vids in person_vids.items():
+    vids = sorted(set(vids))
+    person_combos = []
+    for r in range(2, len(vids) + 1):
+        for combo in combinations(vids, r):
+            variant_combination_id = combo_id_map[combo]
+            # Save record for this person and this variant_combination_id
+            records.append({
+                "person_id": person_id,
+                "variant_combination_id": variant_combination_id
+            })
+
+variant_combinations_df = pd.DataFrame(records).drop_duplicates()
+
+# === Merge variant combinations with conditions on person_id ===
+final_df = pd.merge(
+    variant_combinations_df,
+    condition_df[["person_id", "standard_name"]].drop_duplicates(),
+    on="person_id",
+    how="inner"
+)
+
+# final_df columns: person_id, variant_combination_id, standard_name
