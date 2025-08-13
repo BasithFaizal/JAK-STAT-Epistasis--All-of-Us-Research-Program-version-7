@@ -1,0 +1,39 @@
+from google.cloud import storage
+import pandas as pd
+import io
+from itertools import combinations
+import os
+
+# Step 0: Load jak_epistasis from the parquet file in GCS
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+blob = bucket.blob("data/internship-directory/epistasis.parquet")
+
+# Download and read parquet into DataFrame
+parquet_bytes = blob.download_as_bytes()
+jak_epistasis = pd.read_parquet(io.BytesIO(parquet_bytes))
+
+# Step 1: Group vids by person_id
+person_vids = jak_epistasis.groupby("person_id")["vid"].unique()
+
+# Step 2: Generate all unique variant combinations (length ≥ 2)
+combination_set = set()
+for vids in person_vids:
+    vids = sorted(set(vids))
+    for r in range(2, len(vids) + 1):
+        for combo in combinations(vids, r):
+            combination_set.add(combo)
+
+# Step 3: Assign unique IDs to each combination
+combination_list = list(combination_set)
+variant_combination_map = []
+for idx, combo in enumerate(combination_list, start=1):
+    for vid in combo:
+        variant_combination_map.append({
+            "vid": vid,
+            "variant_combination_id": idx
+        })
+
+# Step 4: Create final DataFrame
+variant_combination_df = pd.DataFrame(variant_combination_map)
