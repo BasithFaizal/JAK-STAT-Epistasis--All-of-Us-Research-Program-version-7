@@ -1,0 +1,75 @@
+# Jak_epistasis_df 
+from google.cloud import bigquery
+import pandas as pd
+import os
+
+# Initialize client
+client = bigquery.Client()
+cdr = os.environ["WORKSPACE_CDR"]
+
+# JAK/STAT pathway genes
+jak_stat_genes = ['JAK1', 'JAK2', 'JAK3', 'TYK2', 'STAT1', 'STAT2', 'STAT3', 'STAT4', 'STAT5A', 'STAT5B','STAT6']
+
+# SQL query
+query = f"""
+WITH jak_stat_missense_variants AS (
+  SELECT
+    va.vid,
+    va.protein_change,
+    va.dna_change,
+    va.clinical_significance,
+    va.consequence,
+    va.genes,
+    person_id
+  FROM `{cdr}.cb_variant_attribute` va
+  JOIN `{cdr}.cb_variant_to_person` vp
+    ON va.vid = vp.vid
+  CROSS JOIN UNNEST(vp.person_ids) AS person_id
+  WHERE
+    EXISTS (
+      SELECT 1 FROM UNNEST(va.consequence) AS c
+      WHERE LOWER(c) LIKE '%missense%'
+    )
+    AND va.genes IN UNNEST(@jak_stat_genes)
+),
+person_variant_counts AS (
+  SELECT
+    person_id,
+    COUNT(DISTINCT vid) AS num_variants
+  FROM jak_stat_missense_variants
+  GROUP BY person_id
+  HAVING num_variants > 1
+),
+final_variants AS (
+  SELECT
+    v.*,
+    pvc.num_variants
+  FROM jak_stat_missense_variants v
+  JOIN person_variant_counts pvc
+    ON v.person_id = pvc.person_id
+  WHERE pvc.person_id IN (
+    SELECT person_id FROM person_variant_counts ORDER BY person_id LIMIT 25
+  )
+)
+SELECT *
+FROM final_variants
+ORDER BY person_id, vid
+"""
+
+# Add query parameters
+job_config = bigquery.QueryJobConfig(
+    query_parameters=[
+        bigquery.ArrayQueryParameter("jak_stat_genes", "STRING", jak_stat_genes)
+    ]
+)
+
+# Run query and load results
+query_job = client.query(query, job_config=job_config)
+jak_epistasis = query_job.to_dataframe()
+
+# Display output
+print("Variants in JAK/STAT genes for persons with multiple missense mutations:")
+jak_epistasis.head(50)  # adjust as needed
+
+# Optionally export to CSV
+# df.to_csv("jak_stat_epistasis_variants.csv", index=False)
