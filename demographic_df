@@ -1,0 +1,50 @@
+# demographic_df
+from google.cloud import bigquery, storage
+import pandas as pd
+import os
+import io
+
+# Load person_ids from the parquet file in the GCS bucket
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+blob = bucket.blob("data/internship-directory/epistasis.parquet")
+
+# Download and load the parquet into a DataFrame
+parquet_bytes = blob.download_as_bytes()
+epistasis_df = pd.read_parquet(io.BytesIO(parquet_bytes))
+
+# Extract unique person_ids
+person_ids = epistasis_df["person_id"].dropna().unique().tolist()
+
+# Set up BigQuery client and environment
+bq_client = bigquery.Client()
+cdr = os.environ["WORKSPACE_CDR"]
+
+# Create the query to fetch demographic info
+query = f"""
+SELECT
+  person_id,
+  gender,
+  sex_at_birth,
+  race,
+  ethnicity,
+  dob,
+  age_at_consent,
+  age_at_cdr
+FROM `{cdr}.cb_search_person`
+WHERE person_id IN UNNEST(@person_ids)
+"""
+
+# Set up the query config with person_id array parameter
+job_config = bigquery.QueryJobConfig(
+    query_parameters=[
+        bigquery.ArrayQueryParameter("person_ids", "INT64", person_ids)
+    ]
+)
+
+# Run the query
+query_job = bq_client.query(query, job_config=job_config)
+demographic_df = query_job.to_dataframe()
+
+# DataFrame `demographic_df` now contains the demographics for all person_ids in the parquet file
