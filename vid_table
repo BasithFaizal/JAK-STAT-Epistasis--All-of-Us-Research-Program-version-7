@@ -1,20 +1,37 @@
-# Vid Table
+# Vid Table 2
 import pandas as pd
 import os
 
-# Get your CDR dataset name
+# Get dataset
 cdr = os.environ["WORKSPACE_CDR"]
 
-# SQL to find all tables that have a column named 'vid'
-vid_column_query = f"""
-    SELECT 
-        table_name, 
-        column_name, 
-        data_type 
+# Step 1: Find all tables that contain a column named 'vid'
+vid_tables_query = f"""
+    SELECT DISTINCT table_name
     FROM `{cdr}.INFORMATION_SCHEMA.COLUMNS`
     WHERE LOWER(column_name) = 'vid'
 """
+vid_tables_df = pd.read_gbq(vid_tables_query, dialect="standard")
+vid_table_names = vid_tables_df['table_name'].tolist()
 
-# Run the query
-vid_tables_df = pd.read_gbq(vid_column_query, dialect="standard")
-vid_tables_df
+# Step 2: For each table, get all its columns
+all_columns = []
+
+for table in vid_table_names:
+    column_query = f"""
+        SELECT 
+            '{table}' AS table_name,
+            column_name,
+            data_type,
+            is_nullable
+        FROM `{cdr}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name = '{table}'
+        ORDER BY ordinal_position
+    """
+    df = pd.read_gbq(column_query, dialect="standard")
+    all_columns.append(df)
+
+# Step 3: Concatenate all results into one DataFrame
+all_columns_df = pd.concat(all_columns, ignore_index=True)
+all_columns_df
+
