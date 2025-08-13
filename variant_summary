@@ -1,0 +1,56 @@
+from google.cloud import storage
+import pandas as pd
+import io
+import os
+
+# Load disease_variant_person.parquet from GCS
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+blob = bucket.blob("data/internship-directory/disease_variant_person.parquet")
+
+# Download and read into DataFrame
+parquet_bytes = blob.download_as_bytes()
+df = pd.read_parquet(io.BytesIO(parquet_bytes))
+
+# Step 1: Find variant_combination_ids that appear in multiple people
+vc_counts = df[["person_id", "variant_combination_id"]].drop_duplicates()
+vc_multiple = vc_counts.groupby("variant_combination_id").filter(lambda x: len(x) > 1)
+
+# Restrict to only variant_combination_ids with multiple people
+valid_vc_ids = vc_multiple["variant_combination_id"].unique()
+filtered_df = df[df["variant_combination_id"].isin(valid_vc_ids)].drop_duplicates()
+
+# Step 2: Total number of people with each variant_combination_id
+total_by_vc = vc_multiple.groupby("variant_combination_id")["person_id"].nunique().reset_index()
+total_by_vc.rename(columns={"person_id": "num_people_with_variant_combination"}, inplace=True)
+
+# Step 3: People with variant_combination_id AND disease
+with_disease = filtered_df.groupby(["variant_combination_id", "standard_name"])["person_id"].nunique().reset_index()
+with_disease.rename(columns={"person_id": "num_people_with_variant_combination_and_disease"}, inplace=True)
+
+# Step 4: Merge and compute remaining columns
+summary_df = pd.merge(with_disease, total_by_vc, on="variant_combination_id", how="left")
+summary_df["num_people_with_variant_combination_without_disease"] = (
+    summary_df["num_people_with_variant_combination"] - summary_df["num_people_with_variant_combination_and_disease"]
+)
+
+# Step 5: Add percentage columns
+summary_df["percent_with_disease"] = (
+    summary_df["num_people_with_variant_combination_and_disease"] / summary_df["num_people_with_variant_combination"]
+).round(3)
+
+summary_df["percent_without_disease"] = (
+    summary_df["num_people_with_variant_combination_without_disease"] / summary_df["num_people_with_variant_combination"]
+).round(3)
+
+# Final columns and order
+summary_df = summary_df[[
+    "standard_name", 
+    "variant_combination_id",
+    "num_people_with_variant_combination",
+    "num_people_with_variant_combination_and_disease",
+    "num_people_with_variant_combination_without_disease",
+    "percent_with_disease",
+    "percent_without_disease"
+]]
