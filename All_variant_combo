@@ -1,0 +1,79 @@
+from collections import defaultdict
+from itertools import combinations
+import pandas as pd
+import io
+from google.cloud import storage
+import os
+
+##### PARAMETERS #####
+min_support = 20          # combos must appear in >= this many unique persons
+max_k = 3                 # maximum combo size (set 2 for only pairs, 3 for up to triples, etc.)
+######################
+
+# --- 0. Load all_epistasis from GCS ---
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+blob = bucket.blob("data/internship-directory/all_epistasis.parquet")
+parquet_bytes = blob.download_as_bytes()
+all_epistasis = pd.read_parquet(io.BytesIO(parquet_bytes))
+
+# --- 1. Pre-filter: keep only vids that occur in >= min_support distinct persons ---
+vid_counts = all_epistasis.groupby("vid")["person_id"].nunique()
+kept_vids = set(vid_counts[vid_counts >= min_support].index)
+
+df_filtered = all_epistasis[all_epistasis["vid"].isin(kept_vids)].copy()
+
+# --- 2. Build per-person vid lists ---
+person_vids_series = df_filtered.groupby("person_id")["vid"].unique()
+person_vids = {
+    pid: tuple(sorted(set(vids)))
+    for pid, vids in person_vids_series.items()
+    if len(vids) >= 2
+}
+
+# --- 3. Frequent 2-combos (pairs) ---
+pair_to_persons = defaultdict(set)
+for pid, vids in person_vids.items():
+    for pair in combinations(vids, 2):
+        pair_to_persons[pair].add(pid)
+
+frequent_k = {pair: persons for pair, persons in pair_to_persons.items()
+              if len(persons) >= min_support}
+
+# --- 4. Iteratively grow to k=3..max_k ---
+all_frequents = {2: frequent_k}
+for k in range(3, max_k + 1):
+    prev_frequents = all_frequents.get(k - 1, {})
+    if not prev_frequents:
+        break
+    candidate_k = defaultdict(set)
+    for combo_prev, persons in prev_frequents.items():
+        last_in_prev = combo_prev[-1]
+        for pid in persons:
+            vids = person_vids[pid]
+            for v in vids:
+                if v <= last_in_prev:
+                    continue
+                new_combo = combo_prev + (v,)
+                candidate_k[new_combo].add(pid)
+    frequent_k_dict = {c: p for c, p in candidate_k.items()
+                       if len(p) >= min_support}
+    if not frequent_k_dict:
+        break
+    all_frequents[k] = frequent_k_dict
+
+# --- 5. Build ONLY the 2-column mapping table ---
+combo_vid_map = []
+current_id = 1
+
+for ksize in sorted(all_frequents.keys()):
+    for combo, persons in sorted(all_frequents[ksize].items()):
+        for vid in combo:
+            combo_vid_map.append({
+                "variant_combination_id": current_id,
+                "vid": vid
+            })
+        current_id += 1
+
+variant_combination_map_df = pd.DataFrame(combo_vid_map)
