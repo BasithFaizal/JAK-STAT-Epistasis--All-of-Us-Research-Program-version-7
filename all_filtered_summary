@@ -1,0 +1,101 @@
+from google.cloud import storage
+import pandas as pd
+import io
+import os
+from tqdm import tqdm  # progress bar
+
+# --- 0. Load Parquet files from GCS ---
+storage_client = storage.Client()
+bucket_name = os.getenv("WORKSPACE_BUCKET").replace("gs://", "")
+bucket = storage_client.bucket(bucket_name)
+
+# all_variant_combo.parquet
+blob = bucket.blob("data/internship-directory/all_variant_combo.parquet")
+all_variant_combo = pd.read_parquet(io.BytesIO(blob.download_as_bytes()))
+all_variant_combo = all_variant_combo[["variant_combination_id", "vid"]]
+
+# all_epistasis.parquet
+blob = bucket.blob("data/internship-directory/all_epistasis.parquet")
+all_epistasis = pd.read_parquet(io.BytesIO(blob.download_as_bytes()))
+all_epistasis = all_epistasis[["vid", "person_id"]]
+
+# all_condition.parquet
+blob = bucket.blob("data/internship-directory/all_condition.parquet")
+all_condition = pd.read_parquet(io.BytesIO(blob.download_as_bytes()))
+all_condition = all_condition[["person_id", "standard_name"]]
+
+# --- 1. Pre-filter conditions to reduce memory ---
+# Keep only diseases with at least 20 people
+disease_counts = all_condition["standard_name"].value_counts()
+valid_diseases = disease_counts[disease_counts >= 20].index
+all_condition = all_condition[all_condition["standard_name"].isin(valid_diseases)]
+
+# Remove irrelevant or broad disease categories early
+exclude_terms = "ethnic|gender|race|history|procedure|group|hypertension|back|pain|cough"
+all_condition = all_condition[
+    ~all_condition["standard_name"].str.contains(exclude_terms, case=False, na=False)
+]
+
+# Only keep person_ids that survived filtering
+valid_person_ids = set(all_condition["person_id"].unique())
+all_epistasis = all_epistasis[all_epistasis["person_id"].isin(valid_person_ids)]
+
+print(f"Remaining diseases after filtering: {all_condition['standard_name'].nunique()}")
+print(f"Remaining persons after filtering: {len(valid_person_ids)}")
+
+# --- 2. Build mapping: vid → person_id (only filtered persons) ---
+vid_to_person = all_epistasis.groupby("vid")["person_id"].unique().to_dict()
+
+# --- 3. Filter variant combinations to only those with at least one vid mapping to a person ---
+all_variant_combo = all_variant_combo[all_variant_combo["vid"].isin(vid_to_person)]
+
+# --- 4. Chunk setup to avoid memory issues ---
+unique_vc_ids = all_variant_combo["variant_combination_id"].unique()
+chunk_size = 300  # adjust based on memory (try 100–500)
+chunks = [unique_vc_ids[i:i + chunk_size] for i in range(0, len(unique_vc_ids), chunk_size)]
+
+filtered_rows = []
+
+# --- 5. Process combinations in chunks ---
+for chunk in tqdm(chunks, desc="Processing chunks"):
+    subset = all_variant_combo[all_variant_combo["variant_combination_id"].isin(chunk)]
+    
+    for vc_id, group in subset.groupby("variant_combination_id"):
+        vids = group["vid"].unique()
+        # Collect all person_ids for this combo (only filtered persons)
+        persons_sets = [set(vid_to_person.get(v, [])) for v in vids]
+        all_persons = set().union(*persons_sets)
+
+        if not all_persons:
+            continue
+
+        # Merge with filtered conditions
+        cond_subset = all_condition[all_condition["person_id"].isin(all_persons)]
+        if cond_subset.empty:
+            continue
+
+        # Count per disease
+        disease_counts = cond_subset.groupby("standard_name")["person_id"].nunique()
+
+        for disease, count_with_disease in disease_counts.items():
+            total_people = len(all_persons)
+            without_disease = total_people - count_with_disease
+            percent_with = round(count_with_disease / total_people, 3)
+            percent_without = round(without_disease / total_people, 3)
+
+            # Keep only strong signals (>50%)
+            if percent_with <= 0.5:
+                continue
+
+            filtered_rows.append({
+                "variant_combination_id": vc_id,
+                "standard_name": disease,
+                "num_people_with_variant_combination": total_people,
+                "num_people_with_variant_combination_and_disease": count_with_disease,
+                "num_people_with_variant_combination_without_disease": without_disease,
+                "percent_with_disease": percent_with,
+                "percent_without_disease": percent_without
+            })
+
+# --- 6. Final DataFrame ---
+all_filtered_summary = pd.DataFrame(filtered_rows)
