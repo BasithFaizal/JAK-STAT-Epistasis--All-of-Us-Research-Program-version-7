@@ -1,0 +1,102 @@
+Jak_epistasis_df - filtered for variants in >=20 people
+from google.cloud import bigquery
+import pandas as pd
+import os
+
+# Initialize BigQuery client
+client = bigquery.Client()
+cdr = os.environ["WORKSPACE_CDR"]
+
+# Expanded JAK/STAT pathway genes and receptors
+jak_stat_genes = [
+    # Core JAK/STAT
+    'JAK1','JAK2','JAK3','TYK2',
+    'STAT1','STAT2','STAT3','STAT4','STAT5A','STAT5B','STAT6',
+
+    # Cytokines & growth factors
+    'IL2','IL4','IL7','IL9','IL15','IL21',
+    'CSF2','IL3','IL5','CNTF','CTF1','CLCF1',
+    'IL27','IL6','IL11','IL13','IL31','LIF','OSM',
+    'IL24','IL19','IL10','IL20','IL22','IL26',
+    'IL12A','IL12B','IL23A',
+    'CSF3','CSH1','CSH2','EPO','GH1','GH2','LEP','PRL','THPO',
+    'IFNA','IFNB','IFNE','IFNL','IFNK','IFNW','IFNG',
+    'EGF','PDGFA','PDGFB',
+
+    # Receptors
+    'IL2RA','IL2RB','IL2RG',
+    'IL4R','IL7R','IL15RA','IL21RA','CRLF2',
+    'CSF2RA','CSF2RB','IL3RA','IL5RA','CNTFR','IL31RA',
+    'IL6R','IL6ST','IL11RA','IL13RA1','IL13RA2',
+    'IL1R','OSMR','IL27RA',
+    'IL10RA','IL10RB','IL20RA','IL20RB',
+    'IL22RA1','IL22RA2',
+    'IL12RB1','IL12RB2','IL23R',
+    'CSF3R','EPOR','GHR','LEPR','MPL','PRLR',
+    'IFNLR1','IFNAR1','IFNAR2','IFNGR1','IFNGR2',
+    'EGFR','PDGFRA','PDGFRB'
+]
+
+# SQL query - filter for variants in >=20 unique individuals
+query = f"""
+WITH jak_stat_missense_variants AS (
+  SELECT
+    va.vid,
+    va.protein_change,
+    va.dna_change,
+    va.clinical_significance,
+    va.consequence,
+    va.genes,
+    person_id
+  FROM `{cdr}.cb_variant_attribute` va
+  JOIN `{cdr}.cb_variant_to_person` vp
+    ON va.vid = vp.vid
+  CROSS JOIN UNNEST(vp.person_ids) AS person_id
+  WHERE
+    EXISTS (
+      SELECT 1 FROM UNNEST(va.consequence) AS c
+      WHERE LOWER(c) LIKE '%missense%'
+    )
+    AND va.genes IN UNNEST(@jak_stat_genes)
+),
+variant_counts AS (
+  SELECT
+    vid,
+    COUNT(DISTINCT person_id) AS num_individuals
+  FROM jak_stat_missense_variants
+  GROUP BY vid
+  HAVING num_individuals >= 20
+),
+person_variant_counts AS (
+  SELECT
+    person_id,
+    COUNT(DISTINCT vid) AS num_variants
+  FROM jak_stat_missense_variants
+  WHERE vid IN (SELECT vid FROM variant_counts)
+  GROUP BY person_id
+  HAVING num_variants > 1
+),
+final_variants AS (
+  SELECT
+    v.*,
+    pvc.num_variants
+  FROM jak_stat_missense_variants v
+  JOIN person_variant_counts pvc
+    ON v.person_id = pvc.person_id
+  WHERE v.vid IN (SELECT vid FROM variant_counts)
+)
+SELECT *
+FROM final_variants
+ORDER BY person_id, vid
+"""
+
+# Add query parameters
+job_config = bigquery.QueryJobConfig(
+    query_parameters=[
+        bigquery.ArrayQueryParameter("jak_stat_genes", "STRING", jak_stat_genes)
+    ]
+)
+
+# Run query and load results
+query_job = client.query(query, job_config=job_config)
+all_epistasis = query_job.to_dataframe()
